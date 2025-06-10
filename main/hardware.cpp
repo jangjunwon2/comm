@@ -155,10 +155,16 @@ void HardwareManager::updateLed() {
             if (elapsedTime >= LED_ID_SET_INCREMENT_BLINK_MS) _currentLedPattern = LedPatternType::LED_OFF;
             break;
         case LedPatternType::LED_ID_DISPLAY: {
-            unsigned long totalDuration = (unsigned long)_ledTargetBlinkCount * 2 * LED_ID_BLINK_INTERVAL_MS;
+            // LED_ID_DISPLAY 패턴 수정: repeatCount 만큼 정확히 깜빡이도록
+            unsigned long blinkDuration = 2 * LED_ID_BLINK_INTERVAL_MS; // 한 번 깜빡이는 데 걸리는 시간 (켜짐 + 꺼짐)
+            unsigned long totalDuration = (unsigned long)_ledTargetBlinkCount * blinkDuration; // 전체 점멸 시간
+
             if (elapsedTime >= totalDuration) {
+                setLed(false); // 마지막엔 꺼짐
                 _currentLedPattern = LedPatternType::LED_OFF;
             } else {
+                // (elapsedTime / LED_ID_BLINK_INTERVAL_MS)는 현재 몇 번째 인터벌인지 나타냅니다.
+                // 짝수 번째 인터벌에서 LED를 켜고, 홀수 번째 인터벌에서 LED를 끕니다.
                 setLed((elapsedTime / LED_ID_BLINK_INTERVAL_MS) % 2 == 0);
             }
             break;
@@ -182,3 +188,7 @@ void HardwareManager::updateLed() {
 bool HardwareManager::isLedPatternActive() const { return _currentLedPattern != LedPatternType::LED_OFF; }
 void HardwareManager::setLed(bool on) { if (_ledState != on) { _ledState = on; digitalWrite(LED_PIN, _ledState); } }
 void HardwareManager::setMosfets(bool on) { if (_mosfetState != on) { _mosfetState = on; digitalWrite(MOSFET_PIN_1, on); digitalWrite(MOSFET_PIN_2, on); Log::Info(PSTR("HW: MOSFETs turned %s."), on ? "ON" : "OFF"); } }
+
+LedPatternType HardwareManager::getCurrentLedPattern() const {
+    return _currentLedPattern;
+}

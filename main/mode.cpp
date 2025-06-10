@@ -24,7 +24,8 @@ ModeManager::ModeManager(HardwareManager* hwManager, CommManager* commManager, W
       _temporaryId(0),             
       _idSetLastInputTime(0),      
       _isPlaySequenceActive(false), _isDelayPhase(false), _delayPhaseEndTime(0), _playPhaseEndTime(0),
-      _lastWebApiActivityTime(0), _updateDownloaded(false) 
+      _lastWebApiActivityTime(0), _updateDownloaded(false),
+      _idBlinkPatternStarted(false)
 {
     _modeSwitchMutex = xSemaphoreCreateMutex();
 }
@@ -236,6 +237,7 @@ void ModeManager::enterModeLogic(DeviceMode mode) {
             _temporaryId = 0; 
             _idSetState = IdSetState::ENTERED; 
             _idSetLastInputTime = millis(); 
+            _idBlinkPatternStarted = false;
             _hwManager->setLedPattern(LedPatternType::LED_ID_SET_ENTER);
             break;
         case DeviceMode::MODE_WIFI:
@@ -291,7 +293,7 @@ void ModeManager::updateModeIdSet() {
         case IdSetState::ENTERED: 
             if (currentTime - _idSetLastInputTime > LED_ID_SET_ENTER_ON_MS) { 
                 _idSetState = IdSetState::AWAITING_INPUT; 
-                 _hwManager->setLedPattern(LedPatternType::LED_OFF);
+                _hwManager->setLedPattern(LedPatternType::LED_OFF);
                 Log::Info(PSTR("MODE: Ready to receive ID input."));
             }
             break;
@@ -304,12 +306,29 @@ void ModeManager::updateModeIdSet() {
         case IdSetState::CONFIRMING_ON: 
             if (currentTime - _idSetLastInputTime > LED_ID_SET_CONFIRM_ON_MS) { 
                 _idSetState = IdSetState::CONFIRMING_BLINK; 
-                _hwManager->setLedPattern(LedPatternType::LED_ID_DISPLAY, _deviceId);
+                _hwManager->setLedPattern(LedPatternType::LED_OFF); // 1초 점등 후 LED를 끕니다.
+                _idSetLastInputTime = currentTime; // 200ms 대기 시간 카운트를 위해 시간 갱신
+                _idBlinkPatternStarted = false;
+                Log::Info(PSTR("MODE: 1초 점등 완료, 200ms 대기 후 ID %d 깜빡임 시작"), _deviceId);
             }
             break;
         case IdSetState::CONFIRMING_BLINK: 
-            if (!_hwManager->isLedPatternActive()) {
-                switchToMode(DeviceMode::MODE_NORMAL); 
+            // 200ms 대기 후 ID 깜빡임을 시작합니다. (단, 아직 시작되지 않았을 경우에만)
+            if (!_idBlinkPatternStarted && 
+                _hwManager->getCurrentLedPattern() == LedPatternType::LED_OFF && 
+                (currentTime - _idSetLastInputTime >= LED_ID_BLINK_INTERVAL_MS)) {
+                _hwManager->setLedPattern(LedPatternType::LED_ID_DISPLAY, _deviceId);
+                _idBlinkPatternStarted = true;
+                Log::Debug(PSTR("MODE: ID 깜빡임 시작 (ID: %d)"), _deviceId);
+            }
+
+            // ID 깜빡임 패턴이 활성화되어 있고, 해당 패턴이 완료되었을 때만 일반 모드로 전환합니다.
+            if (_idBlinkPatternStarted && 
+                _hwManager->getCurrentLedPattern() == LedPatternType::LED_ID_DISPLAY && 
+                !_hwManager->isLedPatternActive()) {
+                Log::Info(PSTR("MODE: ID 깜빡임 완료. 일반 모드로 전환."));
+                _idBlinkPatternStarted = false;
+                switchToMode(DeviceMode::MODE_NORMAL);
             }
             break;
         default: break;
@@ -400,6 +419,7 @@ void ModeManager::finalizeIdSelection() {
     uint8_t finalId = (_temporaryId == 0) ? _deviceId : _temporaryId; 
     updateDeviceId(finalId);
     
+    Log::Info(PSTR("MODE: ID 설정 확정 - ID: %d, 1초 점등 시작"), finalId);
     _hwManager->setLedPattern(LedPatternType::LED_ID_SET_CONFIRM);
 }
 

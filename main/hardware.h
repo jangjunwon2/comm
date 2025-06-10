@@ -20,6 +20,7 @@ public:
     void setLedPattern(LedPatternType pattern, int repeatCount = 0);
     bool isLedPatternActive() const;
     void setMosfets(bool on);
+    LedPatternType getCurrentLedPattern() const;
 
 private:
     void setLed(bool on);

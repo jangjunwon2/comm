@@ -67,6 +67,7 @@ private:
 
     unsigned long _lastWebApiActivityTime;
     bool _updateDownloaded;
+    bool _idBlinkPatternStarted;
 
     void enterModeLogic(DeviceMode mode);
     void exitModeLogic(DeviceMode mode);
