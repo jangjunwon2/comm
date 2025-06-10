@@ -1,3 +1,8 @@
+// jangjunwon2/comm/comm-6295635354ffa5ad160f5b3be2c0db2652b69d97/main/utils.h
+// =========================================================================
+// utils.h
+// =========================================================================
+
 /**
  * @file utils.h
  * @brief 유틸리티 클래스(Log, NVS)의 헤더 파일입니다.
@@ -8,11 +13,11 @@
 #ifndef UTILS_H
 #define UTILS_H
 
-#include <Arduino.h>
-#include <Preferences.h>
-#include <functional>
-#include <esp_task_wdt.h>
-#include "config.h"
+#include <Arduino.h> //
+#include <Preferences.h> //
+#include <functional> //
+#include <esp_task_wdt.h> //
+#include "config.h" //
 
 class WebManager;
 
@@ -20,11 +25,12 @@ class WebManager;
 class Log {
 public:
     using WsLogSender = std::function<void(const String&)>;
-    static void begin(); // [NEW] Mutex 초기화를 위한 함수
-    static void Info(const char* format, ...);
-    static void Warn(const char* format, ...);
-    static void Error(const char* format, ...);
-    static void Debug(const char* format, ...);
+    static void begin(); // [NEW] Mutex 초기화를 위한 함수 //
+    static void Info(const char* format, ...); //
+    static void Warn(const char* format, ...); //
+    static void Error(const char* format, ...); //
+    static void Debug(const char* format, ...); //
+    static void TestLog(const char* format, ...); // [NEW] For simplified test mode logs
 
 private:
     friend class WebManager;

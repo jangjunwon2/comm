@@ -1,3 +1,8 @@
+// jangjunwon2/comm/comm-6295635354ffa5ad160f5b3be2c0db2652b69d97/main/web.h
+// =========================================================================
+// web.h
+// =========================================================================
+
 /**
  * @file web.h
  * @brief WebManager 클래스의 헤더 파일입니다.
@@ -8,10 +13,10 @@
 #ifndef WEB_H
 #define WEB_H
 
-#include <ESPAsyncWebServer.h>
-#include <ArduinoJson.h>
-#include "config.h"
-#include "utils.h"
+#include <ESPAsyncWebServer.h> //
+#include <ArduinoJson.h> //
+#include "config.h" //
+#include "utils.h" //
 
 class ModeManager;
 
@@ -24,6 +29,7 @@ public:
     bool isServerRunning() const;
     void performUpdate();
     void broadcastTestComplete();
+    void broadcastWifiStatus(); // [NEW] Added for WiFi status broadcast on home page
 
 private:
     AsyncWebServer _server;
