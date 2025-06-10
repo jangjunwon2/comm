@@ -140,70 +140,72 @@ void ModeManager::handleButtonEvent(ButtonEventType event) {
     }
 }
 
-// [MODIFIED] handleEspNowCommand 함수에 senderMac 인자 추가 (기존과 동일)
 void ModeManager::handleEspNowCommand(const uint8_t* senderMac, const Comm::CommPacket& pkt) {
+    // 패킷 수신 시각 기록 (수신부 기준)
+    unsigned long rxTime = micros();
+    Log::Info(PSTR("COMM: 패킷 수신 - ID: %d, TX Btn: %u us, TX Pkt: %u us, RX: %lu us"), 
+              pkt.targetId, pkt.txButtonPressMicros, pkt.txMicros, rxTime);
+
     if (_currentMode == DeviceMode::MODE_ID_SET) {
-        Log::Warn(PSTR("MODE: ID_SET mode. ESP-NOW command ignored for timer logic."));
+        Log::Warn(PSTR("MODE: ID_SET 모드에서는 ESP-NOW 명령이 무시됩니다."));
         // ID_SET 모드에서도 ACK는 보내야 송신부가 타임아웃되지 않음
         if (_commManager && senderMac) {
-            _commManager->sendAck(senderMac, pkt.txMicros, micros()); // ACK 전송 (처리 시간 포함)
+            _commManager->sendAck(senderMac, pkt.txMicros, rxTime);
         }
         return;
     }
 
-    unsigned long rxTime = micros(); // 패킷 수신 시각 (수신부 기준)
-
     // 이 패킷이 새 시퀀스의 첫 패킷인지, 아니면 기존 시퀀스의 재전송 패킷인지 확인
     bool isNewCommandSequence = (_currentCommandId != pkt.txButtonPressMicros);
+    Log::Debug(PSTR("COMM: 시퀀스 확인 - 현재: %u, 수신: %u, 새 시퀀스: %s"), 
+               _currentCommandId, pkt.txButtonPressMicros, isNewCommandSequence ? "예" : "아니오");
 
     uint32_t originalDelayMs = pkt.delayMs; // 송신자가 보낸 원본 지연 시간
     uint32_t playMs = pkt.playMs; // 플레이 시간
 
-    // [NEW] 통신 지연 보정값 계산 (현재 패킷의 실제 단방향 지연)
-    long communicationLatencyUs = (long)rxTime - (long)pkt.txMicros;
-    // 음수이거나 너무 큰 값(논리적으로 불가능한 값)이면 0으로 처리하여 안정성 확보
-    if (communicationLatencyUs < 0 || communicationLatencyUs > 1000000) { // 1초 이상 지연이면 비정상으로 판단
-        communicationLatencyUs = 0;
-    }
-    long currentCompensationMs = communicationLatencyUs / 1000L; // 마이크로초를 밀리초로 변환
+    // [MODIFIED] 통신 지연 보정값 계산 로직 변경
+    // 송신기가 보낸 마지막 RTT와 Rx 처리 시간을 사용하여 예상 지연을 계산합니다.
+    long estimatedOneWayLatencyUs = pkt.lastKnownRttUs / 2; // RTT의 절반을 편도 지연으로 가정
+    long estimatedProcessingTimeUs = pkt.lastKnownRxProcessingTimeUs; // 수신기 처리 시간
+
+    // 최종 보정값 = 예상 통신 지연 + 예상 수신기 처리 시간
+    long totalCompensationUs = estimatedOneWayLatencyUs + estimatedProcessingTimeUs;
+    long totalCompensationMs = totalCompensationUs / 1000L; // 밀리초로 변환
 
     if (isNewCommandSequence) {
         if (_isPlaySequenceActive) {
-            Log::Info(PSTR("COMM: New sequence %u received. Stopping previous sequence %u."), pkt.txButtonPressMicros, _currentCommandId);
-            stopPlaySequence(); 
+            Log::Info(PSTR("COMM: New sequence %u received. Stopping previous sequence %u."), 
+                     pkt.txButtonPressMicros, _currentCommandId);
+            stopPlaySequence();
         }
         _currentCommandId = pkt.txButtonPressMicros;
-        _sequenceRxStartTimeUs = rxTime; // 첫 패킷 수신 시각 기록
+        _sequenceRxStartTimeUs = rxTime; // 첫 패킷 수신 시각 기록 (타임아웃 체크용)
 
-        long finalAdjustedDelayMs = originalDelayMs - currentCompensationMs;
+        long finalAdjustedDelayMs = originalDelayMs - totalCompensationMs;
         finalAdjustedDelayMs = std::max(0L, finalAdjustedDelayMs); // 지연 시간이 음수가 되지 않도록 (즉시 실행)
 
-        // [MODIFIED] 요청하신 로그 형식으로 변경
-        Log::Info(PSTR("COMM: Device ID %d"), pkt.targetId);
-        Log::Info(PSTR("  - 원본 데이터 (지연): %u ms (플레이: %u ms)"), originalDelayMs, playMs);
-        Log::Info(PSTR("  - 계산된 보정값 (통신 지연): %ld ms"), currentCompensationMs);
-        Log::Info(PSTR("  - 최종 적용 딜레이: %ld ms"), finalAdjustedDelayMs);
-        
-        Log::Debug(PSTR("COMM: Device ID %d - TX Btn Micros (Sender): %u us, TX Pkt Micros (Sender): %u us, RX Pkt Micros (Receiver): %lu us"),
-                  pkt.targetId, pkt.txButtonPressMicros, pkt.txMicros, rxTime);
-        Log::Debug(PSTR("COMM: Device ID %d - RTT from last comm (from Sender): %u us, RxProc from last comm (from Sender): %u us"),
-                  pkt.targetId, pkt.lastKnownRttUs, pkt.lastKnownRxProcessingTimeUs);
-        
-        startPlaySequence(finalAdjustedDelayMs, playMs); 
+        // [MODIFIED] 요청하신 로그 형식으로 변경 및 디버그 정보 추가
+        Log::Info(PSTR("COMM: 패킷 수신 - ID: %u, 버튼 눌림 시간: %lu ms, 딜레이: %lu ms, 플레이: %lu ms"),
+                  pkt.targetId, pkt.txButtonPressMicros / 1000UL, originalDelayMs, playMs);
+        Log::Info(PSTR("COMM: 보정값 관련 내용: 이전 RTT: %lu us, 이전 Rx 처리: %lu us"),
+                  pkt.lastKnownRttUs, pkt.lastKnownRxProcessingTimeUs);
+        Log::Info(PSTR("COMM: 계산된 보정값 (예상 통신 지연): %ld ms"), estimatedOneWayLatencyUs / 1000L);
+        Log::Info(PSTR("COMM: 계산된 보정값 (예상 수신기 처리): %ld ms"), estimatedProcessingTimeUs / 1000L);
+        Log::Info(PSTR("COMM: 최종 통신 지연값 (총 보정값): %ld ms"), totalCompensationMs);
+        Log::Info(PSTR("MODE: 딜레이 타이머 시작. (원본: %lu ms, 보정 후: %ld ms)"), 
+                 originalDelayMs, finalAdjustedDelayMs);
+
+        startPlaySequence(finalAdjustedDelayMs, playMs);
     } else { // 재전송 패킷
-        // 재전송 패킷이 들어왔을 때 타이머를 조정할지 여부는 현재 구현에서는 고려하지 않음.
-        // 첫 패킷의 보정값으로 타이머를 시작하며, 재전송은 신뢰성 확보에 초점을 맞춤.
-        // 하지만 여기서도 통신 지연을 계산하고 로그로 남길 수 있습니다.
-        Log::Debug(PSTR("COMM: Sequence %u 재전송 수신. 타이머는 이미 실행 중. 현재 통신 지연: %ld us"), 
-                   _currentCommandId, communicationLatencyUs);
+        Log::Debug(PSTR("COMM: 시퀀스 %u 재전송 수신. 타이머는 이미 실행 중. 현재 총 예상 보정값: %ld ms"), 
+                   _currentCommandId, totalCompensationMs);
     }
 
     // ACK 패킷 전송 (송신부로의 확인 응답)
     if (_commManager && senderMac) {
-        _commManager->sendAck(senderMac, pkt.txMicros, rxTime); 
+        _commManager->sendAck(senderMac, pkt.txMicros, rxTime);
     }
 }
-
 
 void ModeManager::triggerManualRun(uint32_t delayMs, uint32_t playMs) {
     if (_currentMode == DeviceMode::MODE_TEST || _currentMode == DeviceMode::MODE_WIFI) {

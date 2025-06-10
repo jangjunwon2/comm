@@ -24,21 +24,15 @@ void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
         return; // 유효하지 않은 ACK 패킷은 무시
     }
 
-    uint8_t ackingDeviceID = ackPkt->senderId;
+    uint8_t ackingDeviceID = ackPkt->senderId;  // [FIXED] deviceID를 senderId로 수정
+    bool found = false;
 
-    for (int i = 0; i < groupDeviceCount; ++i) {
+    for (int i = 0; i < groupDeviceCount; i++) {
         if (runningDevices[i].deviceID == ackingDeviceID) {
-            // 이미 ACK를 성공적으로 받은 경우 다시 처리하지 않음
-            if (runningDevices[i].commStatus == COMM_ACK_RECEIVED_SUCCESS) {
-                logPrintf(LogLevel::LOG_DEBUG, "COMM: ID %d로부터 중복 ACK 수신. 무시됨.", ackingDeviceID);
-                return;
-            }
-
-            // ACK가 대기 중인 상태이고, 원본 송신 타임스탬프와 일치하는 경우에만 처리
-            if ((runningDevices[i].commStatus == COMM_AWAITING_ACK) &&
-                (runningDevices[i].lastTxTimestamp == ackPkt->originalTxMicros))
-            {
-                runningDevices[i].commStatus = COMM_ACK_RECEIVED_SUCCESS; // ACK 수신 성공으로 상태 변경
+            found = true;
+            if (runningDevices[i].commStatus == COMM_AWAITING_ACK && 
+                ackPkt->originalTxMicros == runningDevices[i].lastTxTimestamp) {
+                runningDevices[i].commStatus = COMM_ACK_RECEIVED_SUCCESS;
                 runningDevices[i].successfulAcks++; // 성공적인 ACK 카운트 증가
 
                 unsigned long rtt = micros() - ackPkt->originalTxMicros; // RTT 계산 (송신 시점 - ACK 수신 시점)
@@ -49,14 +43,24 @@ void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
                 g_lastKnownGlobalRttUs = rtt;
                 g_lastKnownGlobalRxProcessingTimeUs = ackPkt->rxProcessingTimeUs;
 
-                logPrintf(LogLevel::LOG_INFO, "COMM: ID %d로부터 ACK 성공. RTT: %lu us, RxProc: %lu us. (전역 값 업데이트됨)", 
-                                ackingDeviceID, rtt, ackPkt->rxProcessingTimeUs);
+                // [MODIFIED] 보정값 관련 로깅 개선
+                logPrintf(LogLevel::LOG_INFO, "COMM: ID %d로부터 ACK 성공", ackingDeviceID);
+                logPrintf(LogLevel::LOG_INFO, "COMM: ID %d - RTT: %lu us (예상 통신 지연: %lu ms)", 
+                         ackingDeviceID, rtt, rtt / 2000);
+                logPrintf(LogLevel::LOG_INFO, "COMM: ID %d - Rx 처리 시간: %lu us (예상 수신기 처리: %lu ms)", 
+                         ackingDeviceID, ackPkt->rxProcessingTimeUs, ackPkt->rxProcessingTimeUs / 1000);
+                logPrintf(LogLevel::LOG_INFO, "COMM: ID %d - 총 예상 지연: %lu ms (전역 값 업데이트됨)", 
+                         ackingDeviceID, (rtt / 2000) + (ackPkt->rxProcessingTimeUs / 1000));
             } else {
                 logPrintf(LogLevel::LOG_WARN, "COMM: ID %d로부터 상태/타임스탬프 불일치 ACK 수신. 무시됨. (현재 상태: %d, 수신 패킷 TX 타임스탬프: %u, 예상 TX 타임스탬프: %u)", 
-                            ackingDeviceID, runningDevices[i].commStatus, ackPkt->originalTxMicros, runningDevices[i].lastTxTimestamp);
+                         ackingDeviceID, runningDevices[i].commStatus, ackPkt->originalTxMicros, runningDevices[i].lastTxTimestamp);
             }
-            return; // 해당 장치에 대한 ACK를 찾았으므로 함수 종료
+            break;
         }
+    }
+
+    if (!found) {
+        logPrintf(LogLevel::LOG_WARN, "COMM: 알 수 없는 장치(ID: %d)로부터 ACK 수신. 무시됨.", ackingDeviceID);
     }
 }
 
@@ -107,19 +111,16 @@ bool sendExecutionCommand(uint8_t targetId, uint32_t txButtonPressSequenceMicros
     
     out_tx_timestamp = packet.txMicros; // 실제 패킷이 전송된 시각 기록
 
-    logPrintf(LogLevel::LOG_DEBUG, "COMM: ID %d - CMD 전송 (버튼: %u us, 패킷: %u us, 지연: %u ms, 플레이: %u ms)", 
-                        targetId, txButtonPressSequenceMicros_arg, out_tx_timestamp, original_delay_ms, play_ms);
-    logPrintf(LogLevel::LOG_DEBUG, "COMM: ID %d - 마지막 RTT (패킷에 포함): %u us, 마지막 Rx 처리 (패킷에 포함): %u us", 
-                        targetId, lastRttUs, lastRxProcessingTimeUs);
+    // [MODIFIED] 보정값 관련 로깅 개선
+    logPrintf(LogLevel::LOG_INFO, "COMM: ID %d - CMD 전송 (버튼: %u us, 패킷: %u us, 지연: %u ms, 플레이: %u ms)", 
+                    targetId, txButtonPressSequenceMicros_arg, out_tx_timestamp, original_delay_ms, play_ms);
+    logPrintf(LogLevel::LOG_INFO, "COMM: ID %d - 보정값 관련 내용: 이전 RTT: %u us, 이전 Rx 처리: %u us", 
+                    targetId, lastRttUs, lastRxProcessingTimeUs);
+    logPrintf(LogLevel::LOG_INFO, "COMM: ID %d - 예상 통신 지연: %u ms, 예상 수신기 처리: %u ms", 
+                    targetId, lastRttUs / 2000, lastRxProcessingTimeUs / 1000);
 
     esp_err_t result = esp_now_send(broadcastAddress, (uint8_t*)&packet, sizeof(packet));
-
-    if (result == ESP_OK) {
-        return true;
-    } else {
-        logPrintf(LogLevel::LOG_ERROR, "ESP-NOW: ID %d로 CMD 전송 실패 (에러=%d)", targetId, result);
-        return false;
-    }
+    return (result == ESP_NOW_SEND_SUCCESS);
 }
 
 // [MODIFIED] 그룹 통신 안정성을 위해 한 번의 호출에 하나의 패킷만 전송하도록 수정
@@ -128,7 +129,7 @@ bool manageCommunication() {
     unsigned long currentTime = millis();
     bool all_comm_done = true;
 
-    for (int i = 0; i < groupDeviceCount; ++i) {
+    for (int i = 0; i < groupDeviceCount; i++) {
         RunningDevice& device = runningDevices[i];
 
         // 이미 ACK를 성공적으로 받았거나 모든 재시도 실패 시 다음 장치로 넘어감
@@ -148,7 +149,9 @@ bool manageCommunication() {
                                 device.deviceID, device.sendAttempts + 1, device.delayTime, device.playTime);
                     
                     uint32_t tx_time;
-                    if (sendExecutionCommand(device.deviceID, device.txButtonPressSequenceMicros, device.delayTime, device.playTime, device.lastRttUs, device.lastRxProcessingTimeUs, tx_time)) {
+                    if (sendExecutionCommand(device.deviceID, device.txButtonPressSequenceMicros, 
+                                          device.delayTime, device.playTime,
+                                          device.lastRttUs, device.lastRxProcessingTimeUs, tx_time)) {
                         device.sendAttempts++;
                         device.lastPacketSendTime = currentTime;
                         device.ackTimeoutDeadline = currentTime + ACK_TIMEOUT_MS;
@@ -175,8 +178,6 @@ bool manageCommunication() {
                 }
                 break;
             }
-            default:
-                break; 
         }
     }
     return all_comm_done; // 모든 통신이 완료되었는지 반환
