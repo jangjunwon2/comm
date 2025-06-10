@@ -25,7 +25,8 @@ ModeManager::ModeManager(HardwareManager* hwManager, CommManager* commManager, W
       _idSetLastInputTime(0),      
       _isPlaySequenceActive(false), _isDelayPhase(false), _delayPhaseEndTime(0), _playPhaseEndTime(0),
       _lastWebApiActivityTime(0), _updateDownloaded(false),
-      _idBlinkPatternStarted(false)
+      _idBlinkPatternStarted(false),
+      _previousDeviceId(DEFAULT_DEVICE_ID)
 {
     _modeSwitchMutex = xSemaphoreCreateMutex();
 }
@@ -79,8 +80,9 @@ void ModeManager::update() {
 void ModeManager::handleButtonEvent(ButtonEventType event) {
     if (event == ButtonEventType::NO_EVENT) return;
 
-    Log::Debug(PSTR("MODE: Handling button event %d in mode %s"), static_cast<int>(event), getModeName(_currentMode)); 
+    Log::Debug(PSTR("MODE: Handling button event %d in mode %s"), static_cast<int>(event), getModeName(_currentMode));
 
+    // BOTH_BUTTONS_LONG_PRESS (Wi-Fi 모드 진입/종료)는 항상 최우선 처리
     if (event == ButtonEventType::BOTH_BUTTONS_LONG_PRESS) {
         if (_currentMode == DeviceMode::MODE_WIFI || _currentMode == DeviceMode::MODE_TEST) {
             exitWifiMode();
@@ -88,9 +90,10 @@ void ModeManager::handleButtonEvent(ButtonEventType event) {
             stopPlaySequence(); // 재생 중이었다면 중지
             switchToMode(DeviceMode::MODE_WIFI);
         }
-        return;
+        return; // 최우선 처리 후 종료
     }
-    
+
+    // Wi-Fi/Test 모드 중 ID 버튼 처리
     if (_currentMode == DeviceMode::MODE_WIFI || _currentMode == DeviceMode::MODE_TEST) {
         if (event == ButtonEventType::ID_BUTTON_SHORT_PRESS) {
             Log::Info(PSTR("MODE: Displaying ID in Wi-Fi mode."));
@@ -98,40 +101,41 @@ void ModeManager::handleButtonEvent(ButtonEventType event) {
         } else if (event == ButtonEventType::ID_BUTTON_LONG_PRESS_END) {
             Log::Warn(PSTR("MODE: ID setting is disabled in Wi-Fi/Test mode."));
         }
+        return; // Wi-Fi/Test 모드의 버튼 처리 후 종료
+    }
+
+    // ID 설정 모드 중 버튼 처리
+    if (_currentMode == DeviceMode::MODE_ID_SET) {
+        _idSetLastInputTime = millis();
+        if (event == ButtonEventType::ID_BUTTON_SHORT_PRESS) incrementTemporaryId();
+        else if (event == ButtonEventType::ID_BUTTON_LONG_PRESS_END) finalizeIdSelection();
+        // ID 설정 모드 중에는 다른 버튼(실행 버튼)은 무시
         return;
     }
 
-    if (_currentMode == DeviceMode::MODE_ID_SET) {
-        _idSetLastInputTime = millis(); 
-        if (event == ButtonEventType::ID_BUTTON_SHORT_PRESS) incrementTemporaryId();
-        else if (event == ButtonEventType::ID_BUTTON_LONG_PRESS_END) finalizeIdSelection();
-        return;
-    }
-    
-    // 재생 시퀀스 중 다른 버튼 이벤트가 발생하면 중단
+    // ID 설정 모드가 아니면서, 재생 시퀀스 중 다른 버튼 이벤트가 발생하면 중단
     if (_isPlaySequenceActive && event != ButtonEventType::NO_EVENT) {
         Log::Info(PSTR("MODE: Play sequence interrupted by button press."));
         stopPlaySequence();
-        return;
     }
 
+    // 일반 모드 및 ID_BLINK 모드에서의 버튼 처리
     switch (event) {
         case ButtonEventType::ID_BUTTON_SHORT_PRESS:
             switchToMode(DeviceMode::MODE_ID_BLINK);
             break;
         case ButtonEventType::ID_BUTTON_LONG_PRESS_END:
+            _previousDeviceId = _deviceId; // ID 설정 모드 진입 전 ID 저장
             switchToMode(DeviceMode::MODE_ID_SET);
             break;
         case ButtonEventType::EXEC_BUTTON_PRESS:
-            // 수동 실행 중인 경우에만 MOSFET 켜기
-            if (_currentMode == DeviceMode::MODE_NORMAL) { // 이 조건이 없으면, ID 설정 등 다른 모드에서 의도치 않게 모터가 켜질 수 있습니다.
+            if (_currentMode == DeviceMode::MODE_NORMAL) {
                 if (_hwManager) _hwManager->setMosfets(true);
                 if (_hwManager) _hwManager->setLedPattern(LedPatternType::LED_ON);
             }
             break;
         case ButtonEventType::EXEC_BUTTON_RELEASE:
-            // 수동 실행 중인 경우에만 MOSFET 끄기
-            if (_currentMode == DeviceMode::MODE_NORMAL) { // 위와 동일한 이유
+            if (_currentMode == DeviceMode::MODE_NORMAL) {
                 if (_hwManager) _hwManager->setMosfets(false);
                 if (_hwManager) _hwManager->setLedPattern(LedPatternType::LED_OFF);
                 Log::Info(PSTR("MODE: Manual execution released after %lu ms."), _hwManager->getExecButtonPressedDuration());
@@ -234,11 +238,12 @@ void ModeManager::enterModeLogic(DeviceMode mode) {
             break;
         case DeviceMode::MODE_ID_SET:
             stopPlaySequence(); // ID 설정 모드 진입 시 재생 시퀀스 중지
-            _temporaryId = 0; 
-            _idSetState = IdSetState::ENTERED; 
-            _idSetLastInputTime = millis(); 
-            _idBlinkPatternStarted = false;
+            _temporaryId = 0; // 지침에 따라 임시 ID를 0으로 설정
+            _idSetState = IdSetState::ENTERED;
+            _idSetLastInputTime = millis();
             _hwManager->setLedPattern(LedPatternType::LED_ID_SET_ENTER);
+            _idBlinkPatternStarted = false; // 새로운 시퀀스를 위해 플래그 초기화
+            Log::Info(PSTR("MODE: ID 설정 모드 진입. 임시 ID: %d."), _temporaryId);
             break;
         case DeviceMode::MODE_WIFI:
             stopPlaySequence(); // Wi-Fi 모드 진입 시 재생 시퀀스 중지
@@ -299,7 +304,7 @@ void ModeManager::updateModeIdSet() {
             break;
         case IdSetState::AWAITING_INPUT: 
             if (currentTime - _idSetLastInputTime > ID_SET_TIMEOUT_MS) { 
-                Log::Info(PSTR("MODE: ID setting timed out."));
+                Log::Info(PSTR("MODE: ID 설정 모드 타임아웃."));
                 finalizeIdSelection();
             }
             break;
@@ -308,26 +313,22 @@ void ModeManager::updateModeIdSet() {
                 _idSetState = IdSetState::CONFIRMING_BLINK; 
                 _hwManager->setLedPattern(LedPatternType::LED_OFF); // 1초 점등 후 LED를 끕니다.
                 _idSetLastInputTime = currentTime; // 200ms 대기 시간 카운트를 위해 시간 갱신
-                _idBlinkPatternStarted = false;
                 Log::Info(PSTR("MODE: 1초 점등 완료, 200ms 대기 후 ID %d 깜빡임 시작"), _deviceId);
             }
             break;
         case IdSetState::CONFIRMING_BLINK: 
-            // 200ms 대기 후 ID 깜빡임을 시작합니다. (단, 아직 시작되지 않았을 경우에만)
-            if (!_idBlinkPatternStarted && 
-                _hwManager->getCurrentLedPattern() == LedPatternType::LED_OFF && 
-                (currentTime - _idSetLastInputTime >= LED_ID_BLINK_INTERVAL_MS)) {
+            // 200ms 대기 후 ID 깜빡임을 시작합니다. (단, 아직 깜빡임 패턴이 시작되지 않았을 경우에만)
+            if (!_idBlinkPatternStarted && (currentTime - _idSetLastInputTime >= LED_ID_BLINK_INTERVAL_MS)) {
                 _hwManager->setLedPattern(LedPatternType::LED_ID_DISPLAY, _deviceId);
-                _idBlinkPatternStarted = true;
+                _idBlinkPatternStarted = true; // 패턴 시작됨 플래그 설정
                 Log::Debug(PSTR("MODE: ID 깜빡임 시작 (ID: %d)"), _deviceId);
             }
 
-            // ID 깜빡임 패턴이 활성화되어 있고, 해당 패턴이 완료되었을 때만 일반 모드로 전환합니다.
-            if (_idBlinkPatternStarted && 
-                _hwManager->getCurrentLedPattern() == LedPatternType::LED_ID_DISPLAY && 
-                !_hwManager->isLedPatternActive()) {
+            // ID 깜빡임 패턴이 시작되었고 (즉, _idBlinkPatternStarted가 true),
+            // 하드웨어 매니저에서 현재 실행 중인 패턴이 더 이상 활성화되지 않았을 때 (즉, 패턴이 종료되었을 때)
+            if (_idBlinkPatternStarted && !_hwManager->isLedPatternActive()) {
                 Log::Info(PSTR("MODE: ID 깜빡임 완료. 일반 모드로 전환."));
-                _idBlinkPatternStarted = false;
+                _idBlinkPatternStarted = false; // 플래그 초기화
                 switchToMode(DeviceMode::MODE_NORMAL);
             }
             break;
@@ -412,15 +413,23 @@ void ModeManager::incrementTemporaryId() {
 }
 
 void ModeManager::finalizeIdSelection() {
-    if (_idSetState != IdSetState::AWAITING_INPUT) return; 
-    _idSetState = IdSetState::CONFIRMING_ON; 
-    _idSetLastInputTime = millis(); 
-    
-    uint8_t finalId = (_temporaryId == 0) ? _deviceId : _temporaryId; 
-    updateDeviceId(finalId);
-    
+    if (_idSetState != IdSetState::AWAITING_INPUT) return;
+    _idSetState = IdSetState::CONFIRMING_ON;
+    _idSetLastInputTime = millis();
+
+    uint8_t finalId;
+    if (_temporaryId == 0) {
+        finalId = _previousDeviceId; // ID가 0이라면 진입 전 ID로 치환
+        Log::Info(PSTR("MODE: 임시 ID가 0이므로, 이전 ID %d로 확정합니다."), finalId);
+    } else {
+        finalId = _temporaryId;
+    }
+
+    updateDeviceId(finalId); // 확정 ID로 업데이트
+
     Log::Info(PSTR("MODE: ID 설정 확정 - ID: %d, 1초 점등 시작"), finalId);
     _hwManager->setLedPattern(LedPatternType::LED_ID_SET_CONFIRM);
+    _idBlinkPatternStarted = false; // 패턴 시작 플래그 초기화
 }
 
 void ModeManager::updateDeviceId(uint8_t newId, bool fromWeb) {
