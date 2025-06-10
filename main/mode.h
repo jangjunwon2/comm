@@ -1,7 +1,7 @@
 /**
  * @file mode.h
  * @brief 장치의 중앙 상태 머신인 ModeManager 클래스의 헤더 파일입니다.
- * @version 7.5.0
+ * @version 7.6.0 // [MODIFIED] 버전 업데이트
  * @date 2024-06-13
  */
 #pragma once
@@ -28,7 +28,8 @@ public:
     void update();
 
     void handleButtonEvent(ButtonEventType event);
-    void handleEspNowCommand(const uint8_t* senderMac, const Comm::CommPacket& pkt); 
+    // [MODIFIED] CommPacket을 const 참조 대신 const 포인터로 받음 (CommManager에서 이미 포인터 사용)
+    void handleEspNowCommand(const uint8_t* senderMac, const Comm::CommPacket* pkt); 
     void triggerManualRun(uint32_t delayMs, uint32_t playMs);
     void switchToMode(DeviceMode newMode, bool forceSwitch = false);
     
@@ -52,8 +53,8 @@ private:
     SemaphoreHandle_t _modeSwitchMutex;
     uint32_t _currentCommandId;
 
-    // [추가] _sequenceRxStartTimeUs 멤버 변수 선언
-    unsigned long _sequenceRxStartTimeUs;
+    // [MODIFIED] _sequenceRxStartTimeUs는 이제 최종 명령 패킷을 받은 시점의 타임스탬프를 의미
+    unsigned long _sequenceRxStartTimeUs; 
 
     IdSetState _idSetState;
     uint8_t _temporaryId;

@@ -5,7 +5,7 @@
 /**
  * @file mode.cpp
  * @brief ModeManager 클래스의 구현입니다.
- * @version 7.5.0
+ * @version 7.6.0 // [MODIFIED] 버전 업데이트
  * @date 2024-06-13
  */
 #include "mode.h"
@@ -140,72 +140,79 @@ void ModeManager::handleButtonEvent(ButtonEventType event) {
     }
 }
 
-void ModeManager::handleEspNowCommand(const uint8_t* senderMac, const Comm::CommPacket& pkt) {
-    // 패킷 수신 시각 기록 (수신부 기준)
-    unsigned long rxTime = micros();
-    Log::Info(PSTR("COMM: 패킷 수신 - ID: %d, TX Btn: %u us, TX Pkt: %u us, RX: %lu us"), 
-              pkt.targetId, pkt.txButtonPressMicros, pkt.txMicros, rxTime);
-
+// [MODIFIED] handleEspNowCommand 함수 변경
+void ModeManager::handleEspNowCommand(const uint8_t* senderMac, const Comm::CommPacket* pkt) {
     if (_currentMode == DeviceMode::MODE_ID_SET) {
-        Log::Warn(PSTR("MODE: ID_SET 모드에서는 ESP-NOW 명령이 무시됩니다."));
-        // ID_SET 모드에서도 ACK는 보내야 송신부가 타임아웃되지 않음
+        Log::Warn(PSTR("MODE: ID_SET mode. ESP-NOW command ignored for timer logic."));
         if (_commManager && senderMac) {
-            _commManager->sendAck(senderMac, pkt.txMicros, rxTime);
+            _commManager->sendAck(senderMac, pkt->txMicros, micros()); // ACK 전송 (처리 시간 포함)
         }
         return;
     }
 
-    // 이 패킷이 새 시퀀스의 첫 패킷인지, 아니면 기존 시퀀스의 재전송 패킷인지 확인
-    bool isNewCommandSequence = (_currentCommandId != pkt.txButtonPressMicros);
-    Log::Debug(PSTR("COMM: 시퀀스 확인 - 현재: %u, 수신: %u, 새 시퀀스: %s"), 
-               _currentCommandId, pkt.txButtonPressMicros, isNewCommandSequence ? "예" : "아니오");
+    unsigned long rxTime = micros(); // 패킷 수신 시각 (수신부 기준)
 
-    uint32_t originalDelayMs = pkt.delayMs; // 송신자가 보낸 원본 지연 시간
-    uint32_t playMs = pkt.playMs; // 플레이 시간
+    Log::Info(PSTR("COMM: 패킷 수신 - ID: %u, 패킷 타입: %u, TX Btn: %lu us, TX Pkt: %lu us, RX: %lu us"),
+              pkt->targetId, pkt->packetType, pkt->txButtonPressMicros, pkt->txMicros, rxTime);
 
-    // [MODIFIED] 통신 지연 보정값 계산 로직 변경
-    // 송신기가 보낸 마지막 RTT와 Rx 처리 시간을 사용하여 예상 지연을 계산합니다.
-    long estimatedOneWayLatencyUs = pkt.lastKnownRttUs / 2; // RTT의 절반을 편도 지연으로 가정
-    long estimatedProcessingTimeUs = pkt.lastKnownRxProcessingTimeUs; // 수신기 처리 시간
-
-    // 최종 보정값 = 예상 통신 지연 + 예상 수신기 처리 시간
-    long totalCompensationUs = estimatedOneWayLatencyUs + estimatedProcessingTimeUs;
-    long totalCompensationMs = totalCompensationUs / 1000L; // 밀리초로 변환
-
-    if (isNewCommandSequence) {
-        if (_isPlaySequenceActive) {
-            Log::Info(PSTR("COMM: New sequence %u received. Stopping previous sequence %u."), 
-                     pkt.txButtonPressMicros, _currentCommandId);
-            stopPlaySequence();
+    // [NEW] 패킷 타입에 따른 분기 처리
+    if (pkt->packetType == Comm::RTT_REQUEST) {
+        // RTT 요청 패킷 수신 시, ACK만 보내고 타이머 시작하지 않음
+        Log::Info(PSTR("COMM: RTT_REQUEST 패킷 수신. ACK 전송 후 최종 명령 대기."));
+        if (_commManager && senderMac) {
+            _commManager->sendAck(senderMac, pkt->txMicros, rxTime); 
         }
-        _currentCommandId = pkt.txButtonPressMicros;
-        _sequenceRxStartTimeUs = rxTime; // 첫 패킷 수신 시각 기록 (타임아웃 체크용)
+    } else if (pkt->packetType == Comm::FINAL_COMMAND) {
+        // 최종 명령 패킷 수신 시, 보정값 계산 후 타이머 시작
+        bool isNewCommandSequence = (_currentCommandId != pkt->txButtonPressMicros);
+        
+        uint32_t originalDelayMs = pkt->delayMs;
+        uint32_t playMs = pkt->playMs;
 
-        long finalAdjustedDelayMs = originalDelayMs - totalCompensationMs;
-        finalAdjustedDelayMs = std::max(0L, finalAdjustedDelayMs); // 지연 시간이 음수가 되지 않도록 (즉시 실행)
+        // [MODIFIED] 보정값은 FINAL_COMMAND 패킷에 포함된 값을 사용
+        long estimatedOneWayLatencyUs = pkt->lastKnownRttUs / 2;
+        long estimatedProcessingTimeUs = pkt->lastKnownRxProcessingTimeUs;
 
-        // [MODIFIED] 요청하신 로그 형식으로 변경 및 디버그 정보 추가
-        Log::Info(PSTR("COMM: 패킷 수신 - ID: %u, 버튼 눌림 시간: %lu ms, 딜레이: %lu ms, 플레이: %lu ms"),
-                  pkt.targetId, pkt.txButtonPressMicros / 1000UL, originalDelayMs, playMs);
-        Log::Info(PSTR("COMM: 보정값 관련 내용: 이전 RTT: %lu us, 이전 Rx 처리: %lu us"),
-                  pkt.lastKnownRttUs, pkt.lastKnownRxProcessingTimeUs);
-        Log::Info(PSTR("COMM: 계산된 보정값 (예상 통신 지연): %ld ms"), estimatedOneWayLatencyUs / 1000L);
-        Log::Info(PSTR("COMM: 계산된 보정값 (예상 수신기 처리): %ld ms"), estimatedProcessingTimeUs / 1000L);
-        Log::Info(PSTR("COMM: 최종 통신 지연값 (총 보정값): %ld ms"), totalCompensationMs);
-        Log::Info(PSTR("MODE: 딜레이 타이머 시작. (원본: %lu ms, 보정 후: %ld ms)"), 
-                 originalDelayMs, finalAdjustedDelayMs);
+        long totalCompensationUs = estimatedOneWayLatencyUs + estimatedProcessingTimeUs;
+        long totalCompensationMs = totalCompensationUs / 1000L;
 
-        startPlaySequence(finalAdjustedDelayMs, playMs);
-    } else { // 재전송 패킷
-        Log::Debug(PSTR("COMM: 시퀀스 %u 재전송 수신. 타이머는 이미 실행 중. 현재 총 예상 보정값: %ld ms"), 
-                   _currentCommandId, totalCompensationMs);
-    }
+        if (isNewCommandSequence) {
+            if (_isPlaySequenceActive) {
+                Log::Info(PSTR("COMM: New sequence %lu received. Stopping previous sequence %lu."), pkt->txButtonPressMicros, _currentCommandId);
+                stopPlaySequence(); 
+            }
+            _currentCommandId = pkt->txButtonPressMicros;
+            _sequenceRxStartTimeUs = rxTime; // 첫 (최종 명령) 패킷 수신 시각 기록
 
-    // ACK 패킷 전송 (송신부로의 확인 응답)
-    if (_commManager && senderMac) {
-        _commManager->sendAck(senderMac, pkt.txMicros, rxTime);
+            long finalAdjustedDelayMs = originalDelayMs - totalCompensationMs;
+            finalAdjustedDelayMs = std::max(0L, finalAdjustedDelayMs); 
+
+            Log::Info(PSTR("COMM: FINAL_COMMAND 패킷 수신 - ID: %u, 버튼 눌림 시간: %lu ms, 딜레이: %lu ms, 플레이: %lu ms"),
+                      pkt->targetId, pkt->txButtonPressMicros / 1000UL, originalDelayMs, playMs);
+            Log::Info(PSTR("COMM: 보정값 관련 내용: 포함된 RTT: %lu us, 포함된 Rx 처리: %lu us"),
+                      pkt->lastKnownRttUs, pkt->lastKnownRxProcessingTimeUs);
+            Log::Info(PSTR("COMM: 계산된 보정값 (예상 통신 지연): %ld ms"), estimatedOneWayLatencyUs / 1000L);
+            Log::Info(PSTR("COMM: 계산된 보정값 (예상 수신기 처리): %ld ms"), estimatedProcessingTimeUs / 1000L);
+            Log::Info(PSTR("COMM: 최종 통신 지연값 (총 보정값): %ld ms"), totalCompensationMs);
+            
+            Log::Info(PSTR("MODE: 딜레이 타이머 시작. (원본: %lu ms, 보정 후: %ld ms)"), originalDelayMs, finalAdjustedDelayMs);
+            
+            startPlaySequence(finalAdjustedDelayMs, playMs); 
+        } else { // 재전송 패킷
+            Log::Debug(PSTR("COMM: 시퀀스 %lu FINAL_COMMAND 재전송 수신. 타이머는 이미 실행 중. 현재 총 예상 보정값: %ld ms"), 
+                       _currentCommandId, totalCompensationMs);
+        }
+
+        // ACK 패킷 전송 (송신부로의 확인 응답)
+        if (_commManager && senderMac) {
+            _commManager->sendAck(senderMac, pkt->txMicros, rxTime); 
+        }
+    } else {
+        Log::Warn(PSTR("COMM: 알 수 없는 패킷 타입 %u 수신. 무시됨."), pkt->packetType);
+        // 알 수 없는 패킷 타입에 대한 ACK는 보내지 않거나, 특정 오류 ACK를 보낼 수 있음
     }
 }
+
 
 void ModeManager::triggerManualRun(uint32_t delayMs, uint32_t playMs) {
     if (_currentMode == DeviceMode::MODE_TEST || _currentMode == DeviceMode::MODE_WIFI) {
@@ -214,6 +221,7 @@ void ModeManager::triggerManualRun(uint32_t delayMs, uint32_t playMs) {
         }
         _currentCommandId = 0; // 수동 실행은 특정 Command ID에 묶이지 않습니다.
         Log::Info(PSTR("MODE: Manual test run started. Delay: %u ms, Play: %u ms."), delayMs, playMs);
+        // [NEW] 수동 실행은 보정값이 없으므로 0, 0으로 전달
         startPlaySequence(delayMs, playMs);
     }
 }
@@ -265,17 +273,10 @@ void ModeManager::exitModeLogic(DeviceMode mode) {
 }
 
 void ModeManager::updateModeNormal() {
-    // 시퀀스 타임아웃 체크
-    if (_isPlaySequenceActive && _sequenceRxStartTimeUs > 0) {
-        unsigned long currentTime = micros();
-        // 시퀀스 시작 후 5초 이상 패킷이 오지 않으면 시퀀스 중단
-        // 이는 통신이 끊겼을 때 장치가 무한정 대기하지 않도록 합니다.
-        if (currentTime - _sequenceRxStartTimeUs > 5000000) { // 5초 = 5,000,000 마이크로초
-            Log::Warn(PSTR("MODE: Sequence %u timeout. No packet received for 5 seconds."), _currentCommandId);
-            stopPlaySequence();
-            _sequenceRxStartTimeUs = 0; // 타임아웃 후 초기화
-        }
-    }
+    // 현재는 이 함수에서 시퀀스 타임아웃을 직접 관리하지 않습니다.
+    // 시퀀스 타임아웃은 송신부의 manageCommunication에서 담당합니다.
+    // 수신부는 FINAL_COMMAND 패킷을 받기 전까지는 타이머를 시작하지 않습니다.
+    // 만약 RTT_REQUEST를 받지 못하고 장치에 문제가 생긴다면, 송신부에서 타임아웃 처리 후 실패로 간주합니다.
 }
 
 void ModeManager::updateModeIdBlink() {
@@ -288,31 +289,27 @@ void ModeManager::updateModeIdSet() {
     unsigned long currentTime = millis();
     switch (_idSetState) { 
         case IdSetState::ENTERED: 
-            // LED가 켜져있는 동안 대기
             if (currentTime - _idSetLastInputTime > LED_ID_SET_ENTER_ON_MS) { 
                 _idSetState = IdSetState::AWAITING_INPUT; 
-                 _hwManager->setLedPattern(LedPatternType::LED_OFF); // LED 끄고 입력 대기
+                 _hwManager->setLedPattern(LedPatternType::LED_OFF);
                 Log::Info(PSTR("MODE: Ready to receive ID input."));
             }
             break;
         case IdSetState::AWAITING_INPUT: 
-            // ID 설정 시간 초과 확인
             if (currentTime - _idSetLastInputTime > ID_SET_TIMEOUT_MS) { 
                 Log::Info(PSTR("MODE: ID setting timed out."));
-                finalizeIdSelection(); // 시간 초과 시 현재 임시 ID로 확정 또는 기본값 사용
+                finalizeIdSelection();
             }
             break;
         case IdSetState::CONFIRMING_ON: 
-            // LED 켜져있는 동안 확인
             if (currentTime - _idSetLastInputTime > LED_ID_SET_CONFIRM_ON_MS) { 
                 _idSetState = IdSetState::CONFIRMING_BLINK; 
-                _hwManager->setLedPattern(LedPatternType::LED_ID_DISPLAY, _deviceId); // 설정된 ID 깜빡임
+                _hwManager->setLedPattern(LedPatternType::LED_ID_DISPLAY, _deviceId);
             }
             break;
         case IdSetState::CONFIRMING_BLINK: 
-            // LED 깜빡임 완료 대기
             if (!_hwManager->isLedPatternActive()) {
-                switchToMode(DeviceMode::MODE_NORMAL); // 일반 모드로 돌아감
+                switchToMode(DeviceMode::MODE_NORMAL); 
             }
             break;
         default: break;
@@ -330,14 +327,12 @@ void ModeManager::updatePlaySequence() {
     unsigned long currentTime = millis();
     if (_isDelayPhase && currentTime >= _delayPhaseEndTime) {
         _isDelayPhase = false;
-        // 딜레이 페이즈가 끝나면 모터 켜고 LED 켜기
         if (_hwManager) {
             _hwManager->setMosfets(true);
             _hwManager->setLedPattern(LedPatternType::LED_ON);
         }
         Log::Info(PSTR("MODE: Delay phase completed. Playing."));
     }
-    // 플레이 페이즈가 끝나면 시퀀스 중지
     if (currentTime >= _playPhaseEndTime) {
         stopPlaySequence();
         Log::Info(PSTR("MODE: Play phase completed."));
@@ -350,18 +345,17 @@ void ModeManager::startPlaySequence(uint32_t delayMs, uint32_t playMs) {
     _delayPhaseEndTime = currentTime + delayMs;
     _playPhaseEndTime = _delayPhaseEndTime + playMs;
 
-    Log::Info(PSTR("MODE: Play sequence started. Calculated delay: %u ms, Play duration: %u ms."), delayMs, playMs);
+    Log::Info(PSTR("MODE: Play sequence started. Calculated delay: %lu ms, Play duration: %lu ms."), delayMs, playMs);
 
     if (delayMs > 0) {
         _isDelayPhase = true;
         if (_hwManager) {
-             _hwManager->setMosfets(false); // 딜레이 중에는 모터 OFF
-             _hwManager->setLedPattern(LedPatternType::LED_OFF); // 딜레이 중에는 LED OFF
+             _hwManager->setMosfets(false);
+             _hwManager->setLedPattern(LedPatternType::LED_OFF);
         }
         Log::Info(PSTR("MODE: Delay phase active."));
     } else {
         _isDelayPhase = false;
-        // 딜레이가 0ms면 즉시 모터 켜고 LED 켜기
         if (_hwManager) {
             _hwManager->setMosfets(true);
             _hwManager->setLedPattern(LedPatternType::LED_ON);
@@ -373,15 +367,15 @@ void ModeManager::startPlaySequence(uint32_t delayMs, uint32_t playMs) {
 void ModeManager::stopPlaySequence() {
     if (_isPlaySequenceActive) {
         _isPlaySequenceActive = false;
-        if (_hwManager) _hwManager->setMosfets(false); // 모터 끄기
-        if (_hwManager) _hwManager->setLedPattern(LedPatternType::LED_OFF); // LED 끄기
+        if (_hwManager) _hwManager->setMosfets(false);
+        if (_hwManager) _hwManager->setLedPattern(LedPatternType::LED_OFF);
 
         if (_currentCommandId != 0) {
-             Log::Info(PSTR("COMM: Sequence %u completed or stopped."), _currentCommandId);
+             Log::Info(PSTR("COMM: Sequence %lu completed or stopped."), _currentCommandId);
         } else {
              Log::Debug(PSTR("MODE: Manual play sequence stopped."));
         }
-        _currentCommandId = 0; // 시퀀스 ID 초기화
+        _currentCommandId = 0;
 
         if (_currentMode == DeviceMode::MODE_TEST) {
              if (_webManager) _webManager->broadcastTestComplete();

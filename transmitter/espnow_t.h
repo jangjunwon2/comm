@@ -23,7 +23,7 @@ void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len);
 // [핵심] 통신 상태 관리 함수 (송신부에서 재전송 및 타임아웃 관리)
 bool manageCommunication();
 
-// 실행 명령 전송 함수
-bool sendExecutionCommand(uint8_t targetId, uint32_t txButtonPressSequenceMicros, uint32_t original_delay_ms, uint32_t play_ms, uint32_t lastRttUs, uint32_t lastRxProcessingTimeUs, uint32_t& out_tx_timestamp);
+// [MODIFIED] 실행 명령 전송 함수에 packetType 파라미터 추가
+bool sendExecutionCommand(Comm::PacketType type, uint8_t targetId, uint32_t txButtonPressSequenceMicros, uint32_t original_delay_ms, uint32_t play_ms, uint32_t rttUs, uint32_t rxProcessingTimeUs, uint32_t& out_tx_timestamp);
 
 #endif // ESPNOW_T_H

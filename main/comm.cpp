@@ -5,7 +5,7 @@
 /**
  * @file comm.cpp
  * @brief CommManager 클래스의 구현입니다.
- * @version 7.5.0
+ * @version 7.6.0 // [MODIFIED] 버전 업데이트
  * @date 2024-06-13
  */
 #include "comm.h"
@@ -90,6 +90,7 @@ void CommManager::updateMyDeviceId(uint8_t newId) {
     }
 }
 
+// [MODIFIED] CommPacket을 const 포인터로 받음
 void CommManager::handleEspNowRecv(const esp_now_recv_info_t* recv_info, const uint8_t* incomingData, int len) {
     const Comm::CommPacket* pkt = nullptr;
     bool forMe = false;
@@ -106,14 +107,11 @@ void CommManager::handleEspNowRecv(const esp_now_recv_info_t* recv_info, const u
     }
 
     if (_modeManager) {
-        // ACK 전송은 ModeManager의 handleEspNowCommand에서 이루어져야 합니다.
-        _modeManager->handleEspNowCommand(recv_info->src_addr, *pkt);
+        _modeManager->handleEspNowCommand(recv_info->src_addr, pkt); // [MODIFIED] 포인터 전달
     }
-    // 이 곳에서 sendAck를 직접 호출하지 않아야 합니다.
 }
 
 void CommManager::handleEspNowSendStatus(const uint8_t* mac_addr, esp_now_send_status_t status) {
-    // ACK 패킷 송신 상태 로그 (디버깅용)
     Log::Debug(PSTR("COMM: MAC %02X:%02X:%02X:%02X:%02X:%02X로 ACK 전송 상태: %s"),
         mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
         status == ESP_NOW_SEND_SUCCESS ? "성공" : "실패");
@@ -122,13 +120,10 @@ void CommManager::handleEspNowSendStatus(const uint8_t* mac_addr, esp_now_send_s
 void CommManager::sendAck(const uint8_t* targetMac, uint32_t original_packet_tx_timestamp, uint32_t rx_time) {
     Comm::AckPacket ackPacket;
     
-    // 수신기 처리 시간 계산 (현재 시간 - 수신 시간)
     uint32_t rxProcessingTime = micros() - rx_time;
     
-    // ACK 패킷 필드 채우기
     Comm::fillAckPacket(ackPacket, _myDeviceId, original_packet_tx_timestamp, rxProcessingTime);
     
-    // 피어 추가 (만약 이미 없거나 실패한 경우)
     if (!esp_now_is_peer_exist(targetMac)) {
         esp_now_peer_info_t peer = {};
         memcpy(peer.peer_addr, targetMac, 6);
@@ -140,13 +135,5 @@ void CommManager::sendAck(const uint8_t* targetMac, uint32_t original_packet_tx_
             return;
         }
     }
-    // ACK 패킷 전송
     esp_now_send(targetMac, (uint8_t*)&ackPacket, sizeof(ackPacket));
 }
-
-// 다음 두 함수 (sendExecutionCommand, manageCommunication)는 송신부 역할에 해당하며,
-// 수신부 CommManager 클래스에서는 제거됩니다. 이 함수들은 이제 espnow.cpp에 있습니다.
-/*
-bool CommManager::sendExecutionCommand(...) { ... }
-bool CommManager::manageCommunication() { ... }
-*/

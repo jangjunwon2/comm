@@ -49,21 +49,23 @@ void startSingleExecution(uint8_t deviceID, unsigned long buttonPressTime) {
     rd.delayTime = getTimerMs(deviceID, true);
     rd.playTime = getTimerMs(deviceID, false);
     rd.txButtonPressSequenceMicros = buttonPressTime;
-    rd.commStatus = COMM_PENDING_INITIAL_SEND;
+    rd.commStatus = COMM_PENDING_RTT_REQUEST; // [MODIFIED] 초기 상태 변경
     rd.sendAttempts = 0;
     rd.successfulAcks = 0;
     rd.lastPacketSendTime = 0;
     rd.lastTxTimestamp = 0;
-    rd.lastRttUs = g_lastKnownGlobalRttUs;
-    rd.lastRxProcessingTimeUs = g_lastKnownGlobalRxProcessingTimeUs;
+    // [REMOVED] rd.lastRttUs = g_lastKnownGlobalRttUs;
+    // [REMOVED] rd.lastRxProcessingTimeUs = g_lastKnownGlobalRxProcessingTimeUs;
+    rd.currentSequenceRttUs = 0; // [NEW] 현재 시퀀스 RTT 초기화
+    rd.currentSequenceRxProcessingTimeUs = 0; // [NEW] 현재 시퀀스 Rx 처리 시간 초기화
     rd.isDelayCompleted = false;
     rd.isCompleted = false;
     rd.delayEndTime = 0;
     rd.playEndTime = 0;
     groupDeviceCount = 1;
 
-    logPrintf(LogLevel::LOG_INFO, "COMM: Prepared single execution for ID %d (RTT: %u us, RxProc: %u us)", 
-              deviceID, rd.lastRttUs, rd.lastRxProcessingTimeUs);
+    logPrintf(LogLevel::LOG_INFO, "COMM: Prepared single execution for ID %d. (RTT/RxProc는 현재 시퀀스에서 측정됨)", 
+              deviceID);
 }
 
 void startGroupExecution(unsigned long buttonPressTime) {
@@ -81,21 +83,23 @@ void startGroupExecution(unsigned long buttonPressTime) {
             rd.delayTime = getTimerMs(id, true);
             rd.playTime = getTimerMs(id, false);
             rd.txButtonPressSequenceMicros = buttonPressTime;
-            rd.commStatus = COMM_PENDING_INITIAL_SEND;
+            rd.commStatus = COMM_PENDING_RTT_REQUEST; // [MODIFIED] 초기 상태 변경
             rd.sendAttempts = 0;
             rd.successfulAcks = 0;
             rd.lastPacketSendTime = 0;
             rd.lastTxTimestamp = 0;
-            rd.lastRttUs = g_lastKnownGlobalRttUs;
-            rd.lastRxProcessingTimeUs = g_lastKnownGlobalRxProcessingTimeUs;
+            // [REMOVED] rd.lastRttUs = g_lastKnownGlobalRttUs;
+            // [REMOVED] rd.lastRxProcessingTimeUs = g_lastKnownGlobalRxProcessingTimeUs;
+            rd.currentSequenceRttUs = 0; // [NEW] 현재 시퀀스 RTT 초기화
+            rd.currentSequenceRxProcessingTimeUs = 0; // [NEW] 현재 시퀀스 Rx 처리 시간 초기화
             rd.isDelayCompleted = false;
             rd.isCompleted = false;
             rd.delayEndTime = 0;
             rd.playEndTime = 0;
             groupDeviceCount++;
 
-            logPrintf(LogLevel::LOG_INFO, "COMM: Added device %d to group execution (RTT: %u us, RxProc: %u us)", 
-                      id, rd.lastRttUs, rd.lastRxProcessingTimeUs);
+            logPrintf(LogLevel::LOG_INFO, "COMM: Added device %d to group execution. (RTT/RxProc는 현재 시퀀스에서 측정됨)", 
+                      id);
         }
     }
 
@@ -106,7 +110,7 @@ void startGroupExecution(unsigned long buttonPressTime) {
         return;
     }
     
-    sortRunningDevicesByDelay(runningDevices, groupDeviceCount);
+    sortRunningDevicesByDelay(runningDevices, groupDeviceCount); // 여전히 딜레이 시간 순으로 정렬 (RTT 요청은 동시에 보내고, 최종 명령은 딜레이가 짧은 순서로 보내면 더 효율적일 수 있으나, 현재는 RTT 요청-응답-최종 명령이 한 디바이스씩 진행되므로 순차 정렬은 의미가 없어짐)
     logPrintf(LogLevel::LOG_INFO, "COMM: Prepared group execution for %d devices.", groupDeviceCount);
 }
 
@@ -124,21 +128,27 @@ void checkExecutionAndMode() {
         for (uint8_t i = 0; i < groupDeviceCount; i++) {
             RunningDevice& rd = runningDevices[i];
             
-            if (rd.delayEndTime == 0) { // If timer hasn't been set yet
-                rd.delayEndTime = now + rd.delayTime;
+            // [MODIFIED] 최종 명령 ACK를 받은 후에만 타이머 시작
+            if (rd.commStatus == COMM_ACK_RECEIVED_SUCCESS && rd.delayEndTime == 0) {
+                // RTT 및 RxProc 값을 사용하여 최종 지연 시간 계산 (이 부분은 수신부에서 진행되므로, 여기서는 단순히 실행 시작으로만 표시)
+                // 송신부의 로컬 타이머는 이미 전체 지연 시간을 기준으로 동작하고 있음.
+                // 그러나 사용자 요구사항에 따라 송신부 로컬 타이머는 보정값과 관계없이 설정된 딜레이/플레이 시간을 따름.
+                // (이 부분이 실제 수신부 동작과 일치하도록 변경하려면 송신부도 수신부처럼 보정된 시간으로 타이머를 시작해야 함.
+                //  하지만 현재는 송신부는 관리, 수신부는 실제 실행이므로, 송신부는 설정된 시간을 따르고 수신부는 보정된 시간을 따르는 것이 맞음.)
+                rd.delayEndTime = now + rd.delayTime; // 송신부는 설정된 딜레이 시간 기준으로 로컬 타이머 시작
                 rd.playEndTime = rd.delayEndTime + rd.playTime;
-                logPrintf(LogLevel::LOG_INFO, "ID %d: Local timer started.", rd.deviceID);
+                logPrintf(LogLevel::LOG_INFO, "ID %d: 송신부 로컬 타이머 시작. (설정된 지연: %lu ms)", rd.deviceID, rd.delayTime);
             }
 
             if (!rd.isDelayCompleted && rd.delayEndTime > 0 && now >= rd.delayEndTime) {
                 rd.isDelayCompleted = true;
                 startMotorVibration(500, false);
-                logPrintf(LogLevel::LOG_DEBUG, "ID %d: Local delay timer ended. Motor ON.", rd.deviceID);
+                logPrintf(LogLevel::LOG_DEBUG, "ID %d: 송신부 로컬 딜레이 타이머 종료. 모터 ON.", rd.deviceID);
             }
 
             if (!rd.isCompleted && rd.playEndTime > 0 && now >= rd.playEndTime) {
                 rd.isCompleted = true;
-                logPrintf(LogLevel::LOG_DEBUG, "ID %d: Local play timer ended.", rd.deviceID);
+                logPrintf(LogLevel::LOG_DEBUG, "ID %d: 송신부 로컬 플레이 타이머 종료.", rd.deviceID);
             }
             
             if (!rd.isCompleted) {
@@ -147,7 +157,7 @@ void checkExecutionAndMode() {
         }
         
         if (allLocalTimersDone) {
-            logPrintf(LogLevel::LOG_INFO, "All local timers finished. Proceeding to completion screen.");
+            logPrintf(LogLevel::LOG_INFO, "모든 송신부 로컬 타이머 종료. 완료 화면으로 전환.");
             currentMode = COMPLETION_MODE;
             completionStartTime = now;
             
@@ -160,7 +170,7 @@ void checkExecutionAndMode() {
     }
     else if (currentMode == COMPLETION_MODE) {
         if (now - completionStartTime >= 500) { 
-            logPrintf(LogLevel::LOG_INFO, "Completion display ended. Returning to GENERAL_MODE.");
+            logPrintf(LogLevel::LOG_INFO, "완료 화면 종료. GENERAL_MODE로 복귀.");
             currentMode = GENERAL_MODE;
             isProcessing = false;
             executionComplete = true; 
@@ -188,15 +198,27 @@ void displayExecutionMode() {
     uint8_t displayCount = 0;
 
     for (uint8_t i = 0; i < groupDeviceCount; i++) {
-        if (!runningDevices[i].isCompleted) {
+        // [MODIFIED] COMM_FAILED_NO_ACK 상태인 장치도 표시 (실패 정보)
+        if (runningDevices[i].commStatus != COMM_ACK_RECEIVED_SUCCESS && runningDevices[i].commStatus != COMM_FAILED_NO_ACK) {
+             // 아직 진행 중인 장치
+             displayDevices[displayCount++] = runningDevices[i];
+        } else if (runningDevices[i].commStatus == COMM_FAILED_NO_ACK) {
+            // 실패한 장치도 목록에 추가하여 표시
             displayDevices[displayCount++] = runningDevices[i];
         }
     }
 
     // [MODIFIED] Sorting logic updated to sort by remaining delay, then by ID.
+    // [NEW] 실패한 장치는 목록의 마지막에 오도록 정렬
     if (displayCount > 1) {
         std::sort(displayDevices, displayDevices + displayCount, 
             [now](const RunningDevice& a, const RunningDevice& b) {
+                // 실패한 장치를 가장 마지막에 배치
+                if (a.commStatus == COMM_FAILED_NO_ACK && b.commStatus != COMM_FAILED_NO_ACK) return false;
+                if (a.commStatus != COMM_FAILED_NO_ACK && b.commStatus == COMM_FAILED_NO_ACK) return true;
+                if (a.commStatus == COMM_FAILED_NO_ACK && b.commStatus == COMM_FAILED_NO_ACK) return a.deviceID < b.deviceID; // 실패한 장치끼리는 ID 순
+
+                // 진행 중인 장치들은 기존 로직대로 남은 시간으로 정렬
                 unsigned long remainingA = 0;
                 if (!a.isDelayCompleted && a.delayEndTime > 0 && a.delayEndTime > now) {
                     remainingA = a.delayEndTime - now;
@@ -226,31 +248,53 @@ void displayExecutionMode() {
 
         char lineBuffer[MAX_CHARS_PER_LINE + 2];
         
-        unsigned long remainingDelayMs = 0;
-        if (!rd.isDelayCompleted && rd.delayEndTime > 0 && rd.delayEndTime > now) {
-            remainingDelayMs = rd.delayEndTime - now;
-        }
-
-        // [MODIFIED] Display format changed to include '/'.
-        if (remainingDelayMs > 0) {
-            unsigned long delayMinutes = remainingDelayMs / MS_PER_MIN;
-            unsigned long delaySeconds = (remainingDelayMs % MS_PER_MIN) / MS_PER_SEC;
-            snprintf(lineBuffer, sizeof(lineBuffer), "ID:%02d/D:%lum%02lus/P:%lus",
-                     rd.deviceID,
-                     delayMinutes,
-                     delaySeconds,
-                     rd.playTime / MS_PER_SEC);
-        } else {
-            unsigned long remainingPlayMs = 0;
-            if (rd.delayEndTime > 0 && rd.playEndTime > 0 && rd.playEndTime > now) {
-                remainingPlayMs = rd.playEndTime - now;
+        // [MODIFIED] 통신 상태에 따라 표시 변경
+        if (rd.commStatus == COMM_ACK_RECEIVED_SUCCESS) {
+            // 성공적으로 통신 완료된 장치는 타이머가 종료되었는지 여부를 표시
+            if (rd.isCompleted) {
+                snprintf(lineBuffer, sizeof(lineBuffer), "ID:%02d/COMPLETE", rd.deviceID);
+            } else if (rd.isDelayCompleted) {
+                 snprintf(lineBuffer, sizeof(lineBuffer), "ID:%02d/PLAYING", rd.deviceID);
+            } else {
+                 snprintf(lineBuffer, sizeof(lineBuffer), "ID:%02d/ACK_OK", rd.deviceID);
             }
-            unsigned long currentPlaySeconds = remainingPlayMs / MS_PER_SEC;
-            snprintf(lineBuffer, sizeof(lineBuffer), "ID:%02d/P:%lus",
-                     rd.deviceID,
-                     currentPlaySeconds);
+        } else if (rd.commStatus == COMM_FAILED_NO_ACK) {
+            snprintf(lineBuffer, sizeof(lineBuffer), "ID:%02d/FAILED", rd.deviceID);
+        } else {
+            // 통신 진행 중인 장치 (딜레이 또는 플레이 시간 표시)
+            unsigned long remainingDelayMs = 0;
+            if (!rd.isDelayCompleted && rd.delayEndTime > 0 && rd.delayEndTime > now) {
+                remainingDelayMs = rd.delayEndTime - now;
+            }
+
+            if (remainingDelayMs > 0) {
+                unsigned long delayMinutes = remainingDelayMs / MS_PER_MIN;
+                unsigned long delaySeconds = (remainingDelayMs % MS_PER_MIN) / MS_PER_SEC;
+                snprintf(lineBuffer, sizeof(lineBuffer), "ID:%02d/D:%lum%02lus/P:%lus",
+                         rd.deviceID,
+                         delayMinutes,
+                         delaySeconds,
+                         rd.playTime / MS_PER_SEC);
+            } else {
+                unsigned long remainingPlayMs = 0;
+                if (rd.delayEndTime > 0 && rd.playEndTime > 0 && rd.playEndTime > now) {
+                    remainingPlayMs = rd.playEndTime - now;
+                }
+                unsigned long currentPlaySeconds = remainingPlayMs / MS_PER_SEC;
+                snprintf(lineBuffer, sizeof(lineBuffer), "ID:%02d/P:%lus",
+                         rd.deviceID,
+                         currentPlaySeconds);
+            }
+            
+            // 통신 상태 추가 표시 (예: RTT_REQ, WAIT_RTT, FINAL_CMD, WAIT_FINAL)
+            switch (rd.commStatus) {
+                case COMM_PENDING_RTT_REQUEST: snprintf(lineBuffer + strlen(lineBuffer), sizeof(lineBuffer) - strlen(lineBuffer), "/REQ_RTT"); break;
+                case COMM_AWAITING_RTT_ACK: snprintf(lineBuffer + strlen(lineBuffer), sizeof(lineBuffer) - strlen(lineBuffer), "/WAIT_RTT"); break;
+                case COMM_PENDING_FINAL_COMMAND: snprintf(lineBuffer + strlen(lineBuffer), sizeof(lineBuffer) - strlen(lineBuffer), "/REQ_CMD"); break;
+                case COMM_AWAITING_FINAL_ACK: snprintf(lineBuffer + strlen(lineBuffer), sizeof(lineBuffer) - strlen(lineBuffer), "/WAIT_CMD"); break;
+                default: break; // 그 외 상태는 표시 안 함
+            }
         }
-        
         display.println(lineBuffer);
 
         if (display.getCursorY() > DISPLAY_HEIGHT - LINE_HEIGHT) break;
@@ -552,7 +596,6 @@ void displayGeneralMode() {
         if (tempCount > 1) sortRunningDevicesByDelay(tempDevices, tempCount);
         for (uint8_t i = 0; i < tempCount; i++) {
             uint8_t id = tempDevices[i].deviceID;
-            // [MODIFIED] Display format changed to include '/'.
             display.printf("ID:%02d/D:%dm%02ds/P:%ds\n", id, deviceSettings[id].delayMinutes, deviceSettings[id].delaySeconds, deviceSettings[id].playSeconds);
             if (display.getCursorY() > DISPLAY_HEIGHT - LINE_HEIGHT) break;
         }
@@ -649,4 +692,3 @@ void decreaseTimerValue() {
     }
     startMotorVibration(50, false);
 }
-

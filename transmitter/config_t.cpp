@@ -23,6 +23,5 @@ unsigned long  executionCompleteTime = 0;
 // ESP-NOW related global variables
 bool           espNowInitialized = false;
 
-// [NEW] 전역적으로 마지막으로 알려진 RTT 및 RxProcessingTime 초기화
-uint32_t g_lastKnownGlobalRttUs = 0;
-uint32_t g_lastKnownGlobalRxProcessingTimeUs = 0;
+// [REMOVED] g_lastKnownGlobalRttUs 및 g_lastKnownGlobalRxProcessingTimeUs 정의 제거
+

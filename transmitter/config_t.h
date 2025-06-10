@@ -62,19 +62,20 @@ static const uint8_t broadcastAddress[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF 
 //────────────────────────────────────────────────────────────────────────────
 // 4) 열거형
 //────────────────────────────────────────────────────────────────────────────
-// [수정됨] LOG_WARN의 명시적인 값 할당을 제거하여 LOG_INFO와 중복되지 않도록 함
 enum class LogLevel { LOG_DEBUG = 0, LOG_INFO, LOG_WARN, LOG_ERROR }; 
 enum ErrorCode { ERROR_NONE = 0, ERROR_INIT_FAILED, ERROR_INVALID_SETTINGS, ERROR_EXECUTION_FAILED };
 enum Mode { GENERAL_MODE = 0, GROUP_SETTING_MODE, TIMER_SETTING_MODE, DETAILED_SETTING_MODE, ADJUSTING_VALUE_MODE, EXECUTION_MODE, COMPLETION_MODE };
 enum TimerUnit { UNIT_MINUTES = 0, UNIT_SECONDS };
 
+// [MODIFIED] 통신 상태 열거형 업데이트
 enum CommStatus {
-    COMM_IDLE,
-    COMM_PENDING_INITIAL_SEND,
-    COMM_AWAITING_ACK,
-    COMM_ACK_RECEIVED_SUCCESS,
-    COMM_ACK_FAILED_RETRYING,
-    COMM_FAILED_NO_ACK
+    COMM_IDLE,                     // 유휴 상태
+    COMM_PENDING_RTT_REQUEST,      // RTT 요청 패킷 전송 대기 중
+    COMM_AWAITING_RTT_ACK,         // RTT 요청 ACK 대기 중
+    COMM_PENDING_FINAL_COMMAND,    // 최종 명령 패킷 전송 대기 중
+    COMM_AWAITING_FINAL_ACK,       // 최종 명령 ACK 대기 중
+    COMM_ACK_RECEIVED_SUCCESS,     // 모든 ACK 성공적으로 수신
+    COMM_FAILED_NO_ACK             // 모든 재시도 후 ACK 수신 실패
 };
 
 //────────────────────────────────────────────────────────────────────────────
@@ -101,10 +102,12 @@ struct RunningDevice {
     uint8_t successfulAcks;
     unsigned long lastPacketSendTime; // 마지막 패킷 전송 시점 (millis())
     unsigned long ackTimeoutDeadline; // ACK 타임아웃 기한 (millis())
-    uint32_t lastTxTimestamp; // 마지막 패킷의 txMicros 값 (micros())
-    uint32_t lastRttUs; // 마지막으로 측정된 RTT (micros())
-    uint32_t lastRxProcessingTimeUs; // 마지막으로 측정된 수신부 처리 시간 (micros())
-    uint32_t txButtonPressSequenceMicros; // [NEW] 이 실행 시퀀스가 시작된 버튼 누름 시점 (micros())
+    uint32_t lastTxTimestamp;         // 마지막 전송 패킷의 txMicros 값 (micros())
+    uint32_t txButtonPressSequenceMicros; // 이 실행 시퀀스가 시작된 버튼 누름 시점 (micros())
+    
+    // [NEW] 현재 시퀀스 내에서 측정된 RTT 및 Rx 처리 시간 (최종 명령 패킷에 포함될 값)
+    uint32_t currentSequenceRttUs; 
+    uint32_t currentSequenceRxProcessingTimeUs;
 };
 
 //────────────────────────────────────────────────────────────────────────────
@@ -124,8 +127,6 @@ extern bool           oledInitialized;
 extern bool           espNowInitialized;
 extern bool           executionComplete; 
 
-// [NEW] 전역적으로 마지막으로 알려진 RTT 및 RxProcessingTime 저장
-extern uint32_t       g_lastKnownGlobalRttUs;
-extern uint32_t       g_lastKnownGlobalRxProcessingTimeUs;
+// [REMOVED] g_lastKnownGlobalRttUs 및 g_lastKnownGlobalRxProcessingTimeUs 전역 변수 제거
 
 #endif // CONFIG_T_H

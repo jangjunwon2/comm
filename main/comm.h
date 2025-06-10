@@ -1,7 +1,7 @@
 /**
  * @file comm.h
  * @brief ESP-NOW 통신을 위한 CommManager 클래스의 헤더 파일입니다.
- * @version 4.0.0
+ * @version 4.1.0 // [MODIFIED] 버전 업데이트
  * @date 2024-06-13
  */
 #pragma once
@@ -32,6 +32,7 @@ public:
     // Wi-Fi 모드 종료 후 ESP-NOW 재초기화
     void reinitForEspNow();
     // ESP-NOW 데이터 수신 처리 (콜백에서 호출됨)
+    // [MODIFIED] CommPacket을 const 참조 대신 const 포인터로 받음
     void handleEspNowRecv(const esp_now_recv_info_t* recv_info, const uint8_t* incomingData, int len);
     // ESP-NOW 데이터 송신 상태 처리 (콜백에서 호출됨)
     void handleEspNowSendStatus(const uint8_t* mac_addr, esp_now_send_status_t status);
